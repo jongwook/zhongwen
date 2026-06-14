@@ -37,3 +37,45 @@ Unihan variant fields for per-character metadata.
 Unicode normalization is separate from Chinese regional variant policy. The
 builder stores both Unicode compatibility variants and OpenCC mappings so an
 application can choose its own display policy.
+
+## Web App
+
+Install dependencies:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+cd web
+npm install
+```
+
+Run the API from the repository root:
+
+```sh
+. .venv/bin/activate
+uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Run the website from `web/`:
+
+```sh
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. The frontend expects the API at
+`http://127.0.0.1:8000` unless `VITE_API_BASE` is set.
+
+The API uses `ZHONGWEN_DB` when set; otherwise it reads
+`data/zhongwen.sqlite`.
+
+### Verification
+
+```sh
+.venv/bin/python -m py_compile api/main.py scripts/build_zhongwen_db.py
+cd web && npm run build
+```
+
+On Node 18, this project pins Vite 5 and overrides esbuild so the build works
+locally. `npm audit` still reports one Vite dev-server advisory whose non-forced
+fix currently requires a newer Vite release and Node 20+.

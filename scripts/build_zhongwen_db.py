@@ -68,6 +68,9 @@ UNIHAN_FIELDS = {
     "kDefinition",
     "kMandarin",
     "kCantonese",
+    "kKorean",
+    "kJapaneseOn",
+    "kJapaneseKun",
     "kSimplifiedVariant",
     "kTraditionalVariant",
     "kSemanticVariant",
@@ -111,6 +114,98 @@ PINYIN_TONE_MARKS = {
     "v": "ǖǘǚǜü",
     "ü": "ǖǘǚǜü",
 }
+
+
+KOREAN_INITIALS = {
+    "KK": 1, "TT": 4, "PP": 8, "SS": 10, "CC": 13,
+    "CH": 14, "KH": 15, "TH": 16, "PH": 17,
+    "K": 0, "N": 2, "T": 3, "L": 5, "R": 5, "M": 6, "P": 7,
+    "S": 9, "C": 12, "H": 18, "": 11,
+}
+KOREAN_VOWELS = {
+    "YAY": 3, "WAY": 10, "WEY": 15, "YEY": 7,
+    "YA": 2, "YE": 6, "YO": 12, "YU": 17, "AY": 1, "EY": 5,
+    "WA": 9, "WE": 14, "WI": 16, "WU": 13, "OY": 11, "UY": 19,
+    "A": 0, "E": 4, "O": 8, "U": 18, "I": 20,
+}
+KOREAN_FINALS = {
+    "": 0, "K": 1, "KK": 2, "KS": 3, "N": 4, "NC": 5, "NH": 6, "T": 7,
+    "L": 8, "LK": 9, "LM": 10, "LP": 11, "LS": 12, "LT": 13, "LPH": 14, "LH": 15,
+    "M": 16, "P": 17, "PS": 18, "S": 19, "SS": 20, "NG": 21, "C": 22, "CH": 23,
+    "KH": 24, "TH": 25, "PH": 26, "H": 27,
+}
+
+JAPANESE_ROMAJI = {
+    "kya": "きゃ", "kyu": "きゅ", "kyo": "きょ", "gya": "ぎゃ", "gyu": "ぎゅ", "gyo": "ぎょ",
+    "sha": "しゃ", "shu": "しゅ", "sho": "しょ", "sya": "しゃ", "syu": "しゅ", "syo": "しょ",
+    "ja": "じゃ", "ju": "じゅ", "jo": "じょ", "jya": "じゃ", "jyu": "じゅ", "jyo": "じょ",
+    "cha": "ちゃ", "chu": "ちゅ", "cho": "ちょ", "cya": "ちゃ", "cyu": "ちゅ", "cyo": "ちょ",
+    "nya": "にゃ", "nyu": "にゅ", "nyo": "にょ", "hya": "ひゃ", "hyu": "ひゅ", "hyo": "ひょ",
+    "bya": "びゃ", "byu": "びゅ", "byo": "びょ", "pya": "ぴゃ", "pyu": "ぴゅ", "pyo": "ぴょ",
+    "mya": "みゃ", "myu": "みゅ", "myo": "みょ", "rya": "りゃ", "ryu": "りゅ", "ryo": "りょ",
+    "tsu": "つ", "shi": "し", "chi": "ち", "fu": "ふ",
+    "ka": "か", "ki": "き", "ku": "く", "ke": "け", "ko": "こ",
+    "ga": "が", "gi": "ぎ", "gu": "ぐ", "ge": "げ", "go": "ご",
+    "sa": "さ", "si": "し", "su": "す", "se": "せ", "so": "そ",
+    "za": "ざ", "zi": "じ", "zu": "ず", "ze": "ぜ", "zo": "ぞ", "ji": "じ",
+    "ta": "た", "ti": "ち", "tu": "つ", "te": "て", "to": "と",
+    "da": "だ", "di": "ぢ", "du": "づ", "de": "で", "do": "ど",
+    "na": "な", "ni": "に", "nu": "ぬ", "ne": "ね", "no": "の",
+    "ha": "は", "hi": "ひ", "hu": "ふ", "he": "へ", "ho": "ほ",
+    "ba": "ば", "bi": "び", "bu": "ぶ", "be": "べ", "bo": "ぼ",
+    "pa": "ぱ", "pi": "ぴ", "pu": "ぷ", "pe": "ぺ", "po": "ぽ",
+    "ma": "ま", "mi": "み", "mu": "む", "me": "め", "mo": "も",
+    "ya": "や", "yu": "ゆ", "yo": "よ", "ra": "ら", "ri": "り", "ru": "る", "re": "れ", "ro": "ろ",
+    "wa": "わ", "wi": "ゐ", "we": "ゑ", "wo": "を", "a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん",
+}
+
+
+def korean_yale_to_hangul(value: str) -> str | None:
+    s = value.upper()
+    initial_key = ""
+    for key in sorted((k for k in KOREAN_INITIALS if k), key=len, reverse=True):
+        if s.startswith(key):
+            initial_key = key
+            break
+    rest = s[len(initial_key):]
+    vowel_key = None
+    for key in sorted(KOREAN_VOWELS, key=len, reverse=True):
+        if rest.startswith(key):
+            vowel_key = key
+            break
+    if not vowel_key:
+        return None
+    final_key = rest[len(vowel_key):]
+    if final_key not in KOREAN_FINALS:
+        return None
+    codepoint = 0xAC00 + (KOREAN_INITIALS[initial_key] * 21 + KOREAN_VOWELS[vowel_key]) * 28 + KOREAN_FINALS[final_key]
+    return chr(codepoint)
+
+
+def japanese_romaji_to_hiragana(value: str) -> str | None:
+    s = value.lower()
+    out = []
+    i = 0
+    while i < len(s):
+        if i + 1 < len(s) and s[i] == s[i + 1] and s[i] not in "aeioun":
+            out.append("っ")
+            i += 1
+            continue
+        if s[i] == "n" and (i + 1 == len(s) or s[i + 1] not in "aeiouy"):
+            out.append("ん")
+            i += 1
+            continue
+        matched = None
+        for size in (3, 2, 1):
+            part = s[i:i + size]
+            if part in JAPANESE_ROMAJI:
+                matched = part
+                break
+        if not matched:
+            return None
+        out.append(JAPANESE_ROMAJI[matched])
+        i += len(matched)
+    return "".join(out)
 
 
 @dataclass(frozen=True)
@@ -235,6 +330,15 @@ def create_schema(conn: sqlite3.Connection) -> None:
             source_field TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY (char, source_field, value)
+        );
+
+        CREATE TABLE reading_preferences (
+            char TEXT NOT NULL,
+            system TEXT NOT NULL,
+            reading TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            PRIMARY KEY (char, system, reading, source)
         );
 
         CREATE TABLE words (
@@ -386,6 +490,25 @@ def load_unihan(conn: sqlite3.Connection, zip_path: Path) -> None:
                         "INSERT OR IGNORE INTO character_readings VALUES (?, ?, ?, ?)",
                         (ch, system, reading, "unihan"),
                     )
+            for rank, reading in enumerate(fields.get("kKorean", "").split(), start=1):
+                hangul = korean_yale_to_hangul(reading)
+                if hangul:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO character_readings VALUES (?, ?, ?, ?)",
+                        (ch, "korean", hangul, "unihan"),
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO reading_preferences VALUES (?, ?, ?, ?, ?)",
+                        (ch, "korean", hangul, rank, "unihan:kKorean"),
+                    )
+            for field in ("kJapaneseOn", "kJapaneseKun"):
+                for reading in fields.get(field, "").split():
+                    hiragana = japanese_romaji_to_hiragana(reading)
+                    if hiragana:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO character_readings VALUES (?, ?, ?, ?)",
+                            (ch, "japanese", hiragana, f"unihan:{field}"),
+                        )
 
             for field, variant_type in (
                 ("kSimplifiedVariant", "simplified"),
@@ -661,6 +784,132 @@ def insert_sources(conn: sqlite3.Connection, results: list[SourceResult]) -> Non
     )
 
 
+def create_app_indexes(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        DROP TABLE IF EXISTS entry_index;
+        DROP TABLE IF EXISTS entry_fts;
+
+        CREATE TABLE entry_index (
+            text TEXT PRIMARY KEY,
+            traditional TEXT,
+            simplified TEXT,
+            has_character INTEGER NOT NULL DEFAULT 0,
+            has_word INTEGER NOT NULL DEFAULT 0,
+            primary_pinyin TEXT,
+            primary_jyutping TEXT,
+            english_summary TEXT,
+            hsk_min_level INTEGER
+        );
+
+        CREATE VIRTUAL TABLE entry_fts USING fts5(
+            text UNINDEXED,
+            traditional,
+            simplified,
+            pinyin,
+            jyutping,
+            english
+        );
+        """
+    )
+
+    def upsert_entry(
+        text_value: str,
+        traditional: str | None = None,
+        simplified: str | None = None,
+        has_character: bool = False,
+        has_word: bool = False,
+        pinyin: str | None = None,
+        jyutping: str | None = None,
+        english: str | None = None,
+        hsk_level: int | None = None,
+    ) -> None:
+        existing = conn.execute("SELECT * FROM entry_index WHERE text=?", (text_value,)).fetchone()
+        if existing:
+            conn.execute(
+                """
+                UPDATE entry_index SET
+                    traditional=COALESCE(traditional, ?),
+                    simplified=COALESCE(simplified, ?),
+                    has_character=max(has_character, ?),
+                    has_word=max(has_word, ?),
+                    primary_pinyin=COALESCE(primary_pinyin, ?),
+                    primary_jyutping=COALESCE(primary_jyutping, ?),
+                    english_summary=COALESCE(english_summary, ?),
+                    hsk_min_level=CASE
+                        WHEN hsk_min_level IS NULL THEN ?
+                        WHEN ? IS NULL THEN hsk_min_level
+                        ELSE min(hsk_min_level, ?)
+                    END
+                WHERE text=?
+                """,
+                (
+                    traditional,
+                    simplified,
+                    1 if has_character else 0,
+                    1 if has_word else 0,
+                    pinyin,
+                    jyutping,
+                    english,
+                    hsk_level,
+                    hsk_level,
+                    hsk_level,
+                    text_value,
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO entry_index VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    text_value,
+                    traditional,
+                    simplified,
+                    1 if has_character else 0,
+                    1 if has_word else 0,
+                    pinyin,
+                    jyutping,
+                    english,
+                    hsk_level,
+                ),
+            )
+
+    for row in conn.execute(
+        """
+        SELECT c.char, c.definition,
+               (SELECT reading FROM character_readings r WHERE r.char=c.char AND r.system='pinyin' ORDER BY source LIMIT 1) AS pinyin,
+               (SELECT reading FROM character_readings r WHERE r.char=c.char AND r.system='jyutping' ORDER BY source LIMIT 1) AS jyutping,
+               (
+                   SELECT min(level) FROM hsk_character_levels h
+                   WHERE h.char=c.char OR h.char IN (
+                       SELECT variant FROM character_variants v
+                       WHERE v.char=c.char AND v.variant_type IN ('simplified', 'traditional')
+                   )
+               ) AS hsk_level
+        FROM characters c
+        """
+    ):
+        upsert_entry(row[0], has_character=True, pinyin=row[2], jyutping=row[3], english=row[1], hsk_level=row[4])
+
+    for row in conn.execute("SELECT id, traditional, simplified, pinyin_diacritic, definitions_json FROM words"):
+        definitions = json.loads(row[4]) if row[4] else []
+        english = "; ".join(definitions[:3])
+        hsk_row = conn.execute(
+            "SELECT min(level) FROM hsk_words WHERE traditional=? OR simplified=? OR word=?",
+            (row[1], row[2], row[2]),
+        ).fetchone()
+        hsk_level = hsk_row[0] if hsk_row else None
+        upsert_entry(row[1], traditional=row[1], simplified=row[2], has_word=True, pinyin=row[3], english=english, hsk_level=hsk_level)
+        upsert_entry(row[2], traditional=row[1], simplified=row[2], has_word=True, pinyin=row[3], english=english, hsk_level=hsk_level)
+
+    conn.execute(
+        """
+        INSERT INTO entry_fts(text, traditional, simplified, pinyin, jyutping, english)
+        SELECT text, COALESCE(traditional,''), COALESCE(simplified,''),
+               COALESCE(primary_pinyin,''), COALESCE(primary_jyutping,''), COALESCE(english_summary,'')
+        FROM entry_index
+        """
+    )
+
 def print_summary(conn: sqlite3.Connection) -> None:
     for table in (
         "characters",
@@ -673,6 +922,8 @@ def print_summary(conn: sqlite3.Connection) -> None:
         "hsk_words",
         "hsk_characters",
         "hsk_character_levels",
+        "reading_preferences",
+        "entry_index",
     ):
         count = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
         print(f"{table}: {count}")
@@ -694,6 +945,7 @@ def main() -> int:
         load_opencc(conn, SOURCES["opencc"]["path"])
         load_rime_cantonese(conn, SOURCES["rime_cantonese"]["path"])
         load_hsk(conn, SOURCES["hsk"]["path"])
+        create_app_indexes(conn)
         conn.commit()
         print_summary(conn)
     finally:

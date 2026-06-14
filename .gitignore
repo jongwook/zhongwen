@@ -1,1 +1,7 @@
 data/*.sqlite
+__pycache__/
+*.pyc
+.venv/
+web/node_modules/
+web/dist/
+data/*.sqlite-*
