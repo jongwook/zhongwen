@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import jieba
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -26,7 +26,6 @@ app.add_middleware(
 )
 
 CJK_RE = re.compile(r"[\u3400-\u9fff\U00020000-\U000323af]")
-UCP_RE = re.compile(r"^U\+([0-9a-fA-F]{4,6})$")
 
 PINYIN_INITIALS = {
     "zh": "ㄓ", "ch": "ㄔ", "sh": "ㄕ",
@@ -496,56 +495,8 @@ def health() -> dict[str, Any]:
     return {"ok": True, "db": str(db_path()), "sources": source_count["count"], "jieba_terms": load_jieba()}
 
 
-@app.get("/api/search")
-def search(q: str = Query(..., min_length=1), limit: int = Query(30, ge=1, le=100)) -> dict[str, Any]:
-    query = q.strip()
-    if not query:
-        return {"query": q, "results": []}
-    cp = UCP_RE.match(query)
-    if cp:
-        ch = chr(int(cp.group(1), 16))
-        return {"query": q, "results": [entry_summary(ch)]}
-
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(items: list[dict[str, Any]], match_type: str) -> None:
-        for item in items:
-            text = item.get("text") or item.get("char") or item.get("traditional") or item.get("simplified")
-            if not text or text in seen:
-                continue
-            item = dict(item)
-            if item.get("primary_pinyin"):
-                item["primary_pinyin"] = normalize_reading("pinyin", item["primary_pinyin"])
-            item["match_type"] = match_type
-            out.append(item)
-            seen.add(text)
-            if len(out) >= limit:
-                return
-
-    add(rows("SELECT * FROM entry_index WHERE text=? LIMIT ?", (query, limit)), "exact")
-    add(rows("SELECT * FROM entry_index WHERE simplified=? OR traditional=? LIMIT ?", (query, query, limit)), "form")
-    add(rows("SELECT * FROM entry_index WHERE primary_pinyin=? OR primary_jyutping=? LIMIT ?", (query, query, limit)), "reading")
-    if len(out) < limit:
-        add(
-            rows(
-                """
-                SELECT ei.* FROM entry_fts f
-                JOIN entry_index ei ON ei.text = f.text
-                WHERE entry_fts MATCH ?
-                ORDER BY ei.has_word DESC, ei.hsk_min_level IS NULL, ei.hsk_min_level, length(ei.text), bm25(entry_fts)
-                LIMIT ?
-                """,
-                (query.replace('"', ' '), limit - len(out)),
-            ),
-            "fulltext",
-        )
-    if len(out) < limit and CJK_RE.search(query):
-        add(rows("SELECT * FROM entry_index WHERE text LIKE ? LIMIT ?", (f"%{query}%", limit - len(out))), "contains")
-    return {"query": q, "results": out[:limit]}
 
 
-@app.get("/api/char/{char}")
 def char_detail(char: str) -> dict[str, Any]:
     if len(char) != 1:
         raise HTTPException(400, "Character endpoint expects exactly one Unicode character")
@@ -560,16 +511,6 @@ def char_detail(char: str) -> dict[str, Any]:
         "character_sources": rows("SELECT * FROM character_sources WHERE char=? ORDER BY source_field, value", (char,)),
         "hsk": hsk_for_text(char),
     }
-
-
-@app.get("/api/word/{text}")
-def word_detail(text: str) -> dict[str, Any]:
-    word_rows = [word_dict(r) for r in rows("SELECT * FROM words WHERE traditional=? OR simplified=? ORDER BY id", (text, text))]
-    if not word_rows:
-        raise HTTPException(404, "Word not found")
-    readings = with_zhuyin_readings(word_readings_for_words(word_rows, text))
-    chars = [entry_summary(ch) for ch in text]
-    return {"text": text, "words": word_rows, "readings": readings, "characters": chars, "hsk": hsk_for_text(text)}
 
 
 @app.get("/api/entry/{text}")
@@ -624,65 +565,3 @@ def segment(req: SegmentRequest) -> dict[str, Any]:
         else:
             tokens.append({"text": token, "start": start, "end": end, "entry": summary})
     return {"text": req.text, "tokens": tokens}
-
-
-@app.get("/api/hsk")
-def hsk_overview() -> dict[str, Any]:
-    return {
-        "word_counts": rows("SELECT level, count(*) AS count FROM hsk_words GROUP BY level ORDER BY level"),
-        "character_counts": rows("SELECT level, count(*) AS count FROM hsk_character_levels GROUP BY level ORDER BY level"),
-    }
-
-
-@app.get("/api/hsk/{level}")
-def hsk_level(level: int) -> dict[str, Any]:
-    if level < 1 or level > 6:
-        raise HTTPException(400, "HSK level must be 1-6")
-    return {
-        "level": level,
-        "words": rows("SELECT * FROM hsk_words WHERE level=? ORDER BY word", (level,)),
-        "characters": rows("SELECT * FROM hsk_character_levels WHERE level=? ORDER BY char", (level,)),
-    }
-
-
-@app.get("/api/readings/{system}/{reading}")
-def readings(system: str, reading: str) -> dict[str, Any]:
-    if system not in {"pinyin", "jyutping", "korean", "japanese"}:
-        raise HTTPException(400, "system must be pinyin, jyutping, korean, or japanese")
-    chars = rows("SELECT * FROM character_readings WHERE system=? AND reading=? ORDER BY char", (system, reading))
-    word_rs = rows(
-        """
-        SELECT w.id, w.traditional, w.simplified, w.pinyin_diacritic, w.definitions_json, wr.reading, wr.source
-        FROM word_readings wr JOIN words w ON w.id=wr.word_id
-        WHERE wr.system=? AND wr.reading=?
-        ORDER BY length(w.traditional), w.traditional
-        LIMIT 200
-        """,
-        (system, reading),
-    )
-    return {"system": system, "reading": reading, "characters": chars, "words": [word_dict(r) for r in word_rs]}
-
-
-@app.get("/api/variants/{text}")
-def variants(text: str) -> dict[str, Any]:
-    return {
-        "text": text,
-        "character_variants": rows(
-            "SELECT * FROM character_variants WHERE char=? OR variant=? ORDER BY char, variant_type, source, variant",
-            (text, text),
-        ),
-        "conversion_mappings": rows(
-            """
-            SELECT * FROM conversion_mappings
-            WHERE source_text=? OR target_text=? OR source_text LIKE ? OR target_text LIKE ?
-            ORDER BY length(source_text), source_text, dictionary, target_text
-            LIMIT 300
-            """,
-            (text, text, f"%{text}%", f"%{text}%"),
-        ),
-    }
-
-
-@app.get("/api/sources")
-def sources() -> dict[str, Any]:
-    return {"sources": rows("SELECT * FROM sources ORDER BY key")}

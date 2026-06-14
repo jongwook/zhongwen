@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Volume2 } from 'lucide-react';
 import './styles.css';
@@ -53,6 +53,117 @@ function speakChinese(value) {
   window.speechSynthesis.speak(utterance);
 }
 
+function translatorApi() {
+  if (window.Translator?.create) {
+    return {
+      availability: (options) => window.Translator.availability?.(options) || Promise.resolve('available'),
+      create: (options) => window.Translator.create(options),
+    };
+  }
+  if (window.translation?.createTranslator) {
+    return {
+      availability: (options) => window.translation.canTranslate?.(options) || Promise.resolve('available'),
+      create: (options) => window.translation.createTranslator(options),
+    };
+  }
+  if (window.ai?.translator?.create) {
+    return {
+      availability: (options) => window.ai.translator.capabilities?.(options).then((cap) => cap.available) || Promise.resolve('available'),
+      create: (options) => window.ai.translator.create(options),
+    };
+  }
+  return null;
+}
+
+function availabilityAllowsTranslation(value) {
+  if (!value) return true;
+  if (typeof value === 'string') return value !== 'unavailable' && value !== 'no';
+  if (typeof value === 'object') return value.available !== 'no' && value.available !== 'unavailable';
+  return Boolean(value);
+}
+
+function progressPercent(event) {
+  const loaded = Number(event.loaded);
+  const total = Number(event.total);
+  if (Number.isFinite(loaded) && Number.isFinite(total) && total > 0) return Math.min(100, (loaded / total) * 100);
+  if (Number.isFinite(loaded) && loaded >= 0 && loaded <= 1) return loaded * 100;
+  return null;
+}
+
+const TRANSLATOR_OPTIONS = { sourceLanguage: 'zh', targetLanguage: 'en' };
+let sharedTranslator = null;
+let sharedTranslatorPromise = null;
+let sharedTranslatorApi = null;
+let sharedTranslatorState = { supported: false, ready: false, progress: null };
+const translatorListeners = new Set();
+
+function setSharedTranslatorState(nextState) {
+  sharedTranslatorState = { ...sharedTranslatorState, ...nextState };
+  translatorListeners.forEach((listener) => listener(sharedTranslatorState));
+}
+
+function subscribeTranslator(listener) {
+  translatorListeners.add(listener);
+  listener(sharedTranslatorState);
+  return () => translatorListeners.delete(listener);
+}
+
+function getSharedTranslator() {
+  return sharedTranslator;
+}
+
+async function checkTranslatorAvailability() {
+  const apiRef = sharedTranslatorApi || translatorApi();
+  sharedTranslatorApi = apiRef;
+  if (!apiRef) {
+    setSharedTranslatorState({ supported: false, ready: false, progress: null });
+    return false;
+  }
+  try {
+    const availability = await apiRef.availability(TRANSLATOR_OPTIONS);
+    const supported = availabilityAllowsTranslation(availability);
+    setSharedTranslatorState({ supported, ready: Boolean(sharedTranslator), progress: null });
+    return supported;
+  } catch {
+    setSharedTranslatorState({ supported: false, ready: false, progress: null });
+    return false;
+  }
+}
+
+function startTranslatorDownload() {
+  const apiRef = sharedTranslatorApi || translatorApi();
+  sharedTranslatorApi = apiRef;
+  if (!apiRef) {
+    setSharedTranslatorState({ supported: false, ready: false, progress: null });
+    return Promise.resolve(null);
+  }
+  if (sharedTranslator) {
+    setSharedTranslatorState({ supported: true, ready: true, progress: null });
+    return Promise.resolve(sharedTranslator);
+  }
+  if (sharedTranslatorPromise) return sharedTranslatorPromise;
+  setSharedTranslatorState({ supported: true, ready: false, progress: null });
+  sharedTranslatorPromise = apiRef.create({
+    ...TRANSLATOR_OPTIONS,
+    monitor(monitor) {
+      monitor.addEventListener?.('downloadprogress', (event) => {
+        const nextProgress = progressPercent(event);
+        if (nextProgress !== null) setSharedTranslatorState({ supported: true, ready: false, progress: nextProgress });
+      });
+    },
+  }).then((translator) => {
+    sharedTranslator = translator;
+    setSharedTranslatorState({ supported: true, ready: true, progress: null });
+    return translator;
+  }).catch(() => {
+    setSharedTranslatorState({ supported: true, ready: false, progress: null });
+    return null;
+  }).finally(() => {
+    sharedTranslatorPromise = null;
+  });
+  return sharedTranslatorPromise;
+}
+
 function RubyText({ text, reading, mode = 'word' }) {
   if (!reading) return <span>{text}</span>;
   if (mode === 'chars') {
@@ -76,6 +187,7 @@ function SearchBox({ onResults }) {
     const query = q.trim() || SEARCH_PLACEHOLDER;
     setLoading(true);
     try {
+      startTranslatorDownload();
       go(readerPath(query));
       onResults([], query);
     } finally {
@@ -153,7 +265,17 @@ function EntryPage({ text, navigateEntry = (value) => go(`/entry/${encodeURIComp
 function ReaderPage({ initialText = '我想學中文', selectedEntry = '' }) {
   const [text, setText] = useState(initialText);
   const [data, setData] = useState(null);
+  const [translatorState, setTranslatorState] = useState(sharedTranslatorState);
+  const [translations, setTranslations] = useState({});
   useEffect(() => { setText(initialText); }, [initialText]);
+  useEffect(() => {
+    const unsubscribe = subscribeTranslator(setTranslatorState);
+    checkTranslatorAvailability();
+    return unsubscribe;
+  }, []);
+  const ensureTranslator = useCallback(() => {
+    startTranslatorDownload();
+  }, []);
   useEffect(() => {
     const handle = setTimeout(() => {
       api('/api/segment', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})}).then(setData);
@@ -194,7 +316,44 @@ function ReaderPage({ initialText = '我想學中文', selectedEntry = '' }) {
     if (current.length || out.length === 0) out.push(current);
     return out;
   }, [data, text]);
+  const lineTexts = useMemo(() => lines.map((line) => line.map((token) => token.text).join('')), [lines]);
+  useEffect(() => {
+    const translator = getSharedTranslator();
+    if (!translatorState.ready || !translator) {
+      setTranslations({});
+      return undefined;
+    }
+    let cancelled = false;
+    setTranslations({});
+    async function translateLines() {
+      const nextTranslations = {};
+      for (const [index, lineText] of lineTexts.entries()) {
+        const source = lineText.trim();
+        if (!source) continue;
+        if (!/\p{Script=Han}/u.test(source)) {
+          nextTranslations[index] = source;
+          setTranslations({ ...nextTranslations });
+          continue;
+        }
+        try {
+          const translated = await translator.translate(source);
+          if (cancelled) return;
+          nextTranslations[index] = translated;
+          setTranslations({ ...nextTranslations });
+        } catch {
+          if (cancelled) return;
+          nextTranslations[index] = '';
+          setTranslations({ ...nextTranslations });
+        }
+      }
+    }
+    translateLines();
+    return () => {
+      cancelled = true;
+    };
+  }, [lineTexts, translatorState.ready]);
   function updateText(value) {
+    ensureTranslator();
     setText(value);
     replaceHash(readerPath(value, selectedEntry));
   }
@@ -205,13 +364,18 @@ function ReaderPage({ initialText = '我想學中文', selectedEntry = '' }) {
     go(readerPath(text));
   }
   return <main className={selectedEntry ? 'reader-layout has-entry' : 'reader-layout'}>
-    <section className="section reader-main">
-      <textarea value={text} onChange={e => updateText(e.target.value)} />
+    <section className="section reader-main" onPointerDownCapture={ensureTranslator}>
+      <textarea value={text} onFocus={ensureTranslator} onChange={e => updateText(e.target.value)} />
       <div className="tokens">{lines.map((line, lineIndex) => {
         const lineText = line.map((token) => token.text).join('');
-        return <div className="token-line" key={lineIndex}>
-          {line.map((t, i) => isChineseToken(t.text) ? <button key={`${lineIndex}-${i}-${t.start}`} onClick={() => selectEntry(t.text)}><RubyText text={t.text} reading={t.entry?.primary_pinyin || ''} mode={t.text.length > 1 ? 'chars' : 'word'} />{!t.entry?.primary_pinyin && <small>{t.entry?.english_summary}</small>}</button> : <span className="plain-token" key={`${lineIndex}-${i}-${t.start}`}>{t.text}</span>)}
-          {!!lineText && <button className="line-speak" aria-label="Play line" onClick={() => speakChinese(lineText)}><Volume2 size={18} /></button>}
+        const progressLabel = translatorState.progress === null ? '' : `Downloading translator ${translatorState.progress.toFixed(1)}%`;
+        const translationText = translatorState.ready ? translations[lineIndex] : progressLabel;
+        return <div className="token-line-block" key={lineIndex}>
+          <div className="token-line">
+            {line.map((t, i) => isChineseToken(t.text) ? <button key={`${lineIndex}-${i}-${t.start}`} onClick={() => selectEntry(t.text)}><RubyText text={t.text} reading={t.entry?.primary_pinyin || ''} mode={t.text.length > 1 ? 'chars' : 'word'} />{!t.entry?.primary_pinyin && <small>{t.entry?.english_summary}</small>}</button> : <span className="plain-token" key={`${lineIndex}-${i}-${t.start}`}>{t.text}</span>)}
+            {!!lineText && <button className="line-speak" aria-label="Play line" onClick={() => speakChinese(lineText)}><Volume2 size={18} /></button>}
+          </div>
+          {translatorState.supported && <span className="line-translation">{translationText || '\u00a0'}</span>}
         </div>;
       })}</div>
     </section>
