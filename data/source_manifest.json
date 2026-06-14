@@ -1,0 +1,50 @@
+{
+  "generated_by": "scripts/build_zhongwen_db.py",
+  "sources": [
+    {
+      "key": "unihan",
+      "url": "https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip",
+      "path": "data/sources/Unihan.zip",
+      "sha256": "f7a48b2b545acfaa77b2d607ae28747404ce02baefee16396c5d2d7a8ef34b5e",
+      "bytes": 8518517,
+      "license": "Unicode License v3",
+      "status": "cached"
+    },
+    {
+      "key": "cc_cedict",
+      "url": "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz",
+      "path": "data/sources/cedict_1_0_ts_utf-8_mdbg.txt.gz",
+      "sha256": "f272e767bcade089cbb3ecae99ae606bf8f6a09ac43e2b89314a2932dab92da3",
+      "bytes": 3975376,
+      "license": "CC BY-SA 4.0, per CC-CEDICT project",
+      "status": "cached"
+    },
+    {
+      "key": "opencc",
+      "url": "https://github.com/BYVoid/OpenCC/archive/refs/heads/master.zip",
+      "path": "data/sources/OpenCC-master.zip",
+      "sha256": "71bd654d7f934240ee164cb777719f699396bdb03d6df9737ffbd4fb141eb3ff",
+      "bytes": 12744122,
+      "license": "Apache-2.0",
+      "status": "cached"
+    },
+    {
+      "key": "rime_cantonese",
+      "url": "https://github.com/rime/rime-cantonese/archive/refs/heads/master.zip",
+      "path": "data/sources/rime-cantonese-master.zip",
+      "sha256": "7dbf9bde63636cebfee47c1d28af3e0ff126f4872b712fb7ca79fa097cbd2dad",
+      "bytes": 4816832,
+      "license": "CC BY 4.0 / ODbL for selected upstream files",
+      "status": "cached"
+    },
+    {
+      "key": "hsk",
+      "url": "https://raw.githubusercontent.com/drkameleon/complete-hsk-vocabulary/main/complete.json",
+      "path": "data/sources/hsk_complete.json",
+      "sha256": "c869a0ce353279c9333d9b42c31fc3549785e8b40673dab57ee42bc99cd14131",
+      "bytes": 9763716,
+      "license": "See upstream repository",
+      "status": "cached"
+    }
+  ]
+}
