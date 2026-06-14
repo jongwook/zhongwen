@@ -80,7 +80,9 @@ the repository root with the project virtualenv active:
 
 This writes the Vite app and JSON data shards under `static/`. The static build
 uses browser-side max-match segmentation and local data files instead of the
-FastAPI API. For quick smoke tests, use a limited data export:
+FastAPI API. Entry export runs in parallel by default and prints live progress, rate, and ETA; tune it with `--workers`
+and `--chunk-size`. For a much faster export that omits the Containing Words
+section, add `--no-containing`. For quick smoke tests, use a limited data export:
 
 ```sh
 .venv/bin/python scripts/export_static.py --limit 200

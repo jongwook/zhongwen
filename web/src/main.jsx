@@ -49,19 +49,32 @@ async function staticSummary(text) {
   return shard[text] || { text, has_character: 0, has_word: 0 };
 }
 
+async function staticShardValue(kind, text, fallback = null) {
+  const shard = await fetchJson(`data/${kind}/${hashShard(text)}.json`).catch(() => ({}));
+  return shard[text] ?? fallback;
+}
+
 async function staticEntry(text) {
-  const shard = await fetchJson(`data/entries/${hashShard(text)}.json`);
-  return shard[text] || {
+  const shell = await staticShardValue('entries', text, null);
+  const summary = shell?.summary || await staticSummary(text);
+  const [characterDetail, wordDetail, relatedWords] = await Promise.all([
+    staticShardValue('characters', text, null),
+    staticShardValue('words', text, null),
+    staticShardValue('containing', text, []),
+  ]);
+  const characters = wordDetail?.characters || (Array.from(text).length > 1 ? await Promise.all(Array.from(text).map(staticSummary)) : []);
+  const wordReadings = wordDetail?.word_readings || [];
+  return {
     text,
-    summary: await staticSummary(text),
-    character: null,
-    character_detail: null,
-    words: [],
-    word_readings: [],
-    readings: [],
-    characters: Array.from(text).length > 1 ? await Promise.all(Array.from(text).map(staticSummary)) : [],
-    related_words: [],
-    hsk: { word_levels: [], character_levels: [] },
+    summary,
+    character: characterDetail?.character || null,
+    character_detail: characterDetail,
+    words: wordDetail?.words || [],
+    word_readings: wordReadings,
+    readings: characterDetail?.readings || wordDetail?.readings || wordReadings,
+    characters,
+    related_words: relatedWords || [],
+    hsk: wordDetail?.hsk || characterDetail?.hsk || { word_levels: [], character_levels: [] },
   };
 }
 

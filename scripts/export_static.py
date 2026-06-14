@@ -14,10 +14,12 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = ROOT / "data" / "zhongwen.sqlite"
@@ -100,31 +102,170 @@ def run_vite_build(out_dir: Path) -> None:
     )
 
 
-def export_data(db_path: Path, out_dir: Path, limit: int | None) -> dict[str, Any]:
-    os.environ["ZHONGWEN_DB"] = str(db_path)
+def add_sharded(shards: dict[str, dict[str, Any]], text: str, payload: Any) -> None:
+    shards[hash_shard(text)][text] = payload
+
+
+def merge_shards(target: dict[str, dict[str, Any]], source: dict[str, dict[str, Any]]) -> None:
+    for shard, values in source.items():
+        target[shard].update(values)
+
+
+def chunked(items: list[str], chunk_size: int) -> list[list[str]]:
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def patch_api_for_conn(api_main: Any, conn: sqlite3.Connection) -> None:
+    api_main.rows = lambda sql, params=(): rows(conn, sql, params)
+    api_main.one = lambda sql, params=(): (dict(row) if (row := conn.execute(sql, params).fetchone()) else None)
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None or seconds == float("inf"):
+        return "?:??"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
+def print_progress(done: int, total: int, started_at: float, final: bool = False) -> None:
+    elapsed = time.monotonic() - started_at
+    rate = done / elapsed if elapsed > 0 else 0
+    remaining = (total - done) / rate if rate > 0 else None
+    percent = (done / total * 100) if total else 100
+    end = "\n" if final else "\r"
+    print(
+        f"exported {done}/{total} entries "
+        f"({percent:5.1f}%) "
+        f"elapsed {format_duration(elapsed)} "
+        f"rate {rate:,.1f}/s "
+        f"ETA {format_duration(remaining)}",
+        end=end,
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def related_words_for(conn: sqlite3.Connection, api_main: Any, text: str) -> list[dict[str, Any]]:
+    related = rows(
+        conn,
+        """
+        SELECT id, traditional, simplified, pinyin_diacritic, definitions_json, source
+        FROM words
+        WHERE traditional LIKE ? OR simplified LIKE ?
+        ORDER BY length(traditional), traditional
+        LIMIT 80
+        """,
+        (f"%{text}%", f"%{text}%"),
+    )
+    return [api_main.word_dict(row) for row in related]
+
+
+def export_entry_chunk(db_path: str, texts: list[str], include_containing: bool) -> dict[str, dict[str, dict[str, Any]]]:
+    os.environ["ZHONGWEN_DB"] = db_path
     sys.path.insert(0, str(ROOT))
-    from api import main as api_main  # Import after ZHONGWEN_DB is set.
+    from api import main as api_main
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
-    api_main.rows = lambda sql, params=(): rows(conn, sql, params)
-    api_main.one = lambda sql, params=(): (dict(row) if (row := conn.execute(sql, params).fetchone()) else None)
+    patch_api_for_conn(api_main, conn)
+
+    entry_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    summary_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    character_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    word_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    containing_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+
+    for text in texts:
+        summary = api_main.entry_summary(text)
+        add_sharded(summary_shards, text, summary)
+        add_sharded(entry_shards, text, {"text": text, "summary": summary})
+
+        if len(text) == 1:
+            character = api_main.one("SELECT * FROM characters WHERE char=?", (text,))
+            if character:
+                add_sharded(character_shards, text, api_main.char_detail(text))
+        word_rows = [
+            api_main.word_dict(row)
+            for row in api_main.rows("SELECT * FROM words WHERE traditional=? OR simplified=? ORDER BY id", (text, text))
+        ]
+        if word_rows:
+            word_readings = api_main.with_zhuyin_readings(api_main.word_readings_for_words(word_rows, text))
+            add_sharded(word_shards, text, {
+                "text": text,
+                "words": word_rows,
+                "word_readings": word_readings,
+                "readings": word_readings,
+                "characters": [api_main.entry_summary(ch) for ch in text] if len(text) > 1 else [],
+                "hsk": api_main.hsk_for_text(text),
+            })
+        if include_containing:
+            containing = related_words_for(conn, api_main, text)
+            if containing:
+                add_sharded(containing_shards, text, containing)
+
+    conn.close()
+    return {
+        "entries": entry_shards,
+        "summaries": summary_shards,
+        "characters": character_shards,
+        "words": word_shards,
+        "containing": containing_shards,
+    }
+
+
+def export_data(db_path: Path, out_dir: Path, limit: int | None, workers: int, chunk_size: int, include_containing: bool) -> dict[str, Any]:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
     texts = candidate_texts(conn, limit)
 
     entry_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
     summary_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
-    for index, text in enumerate(texts, 1):
-        shard = hash_shard(text)
-        summary_shards[shard][text] = api_main.entry_summary(text)
-        entry_shards[shard][text] = api_main.entry(text)
-        if index % 5000 == 0:
-            print(f"exported {index}/{len(texts)} entries", file=sys.stderr)
+    character_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    word_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+    containing_shards: dict[str, dict[str, Any]] = {f"{i:02x}": {} for i in range(SHARD_COUNT)}
+
+    chunks = chunked(texts, chunk_size)
+    completed = 0
+    started_at = time.monotonic()
+    print_progress(0, len(texts), started_at)
+    if workers == 1 or len(chunks) <= 1:
+        for chunk in chunks:
+            result = export_entry_chunk(str(db_path), chunk, include_containing)
+            merge_shards(entry_shards, result["entries"])
+            merge_shards(summary_shards, result["summaries"])
+            merge_shards(character_shards, result["characters"])
+            merge_shards(word_shards, result["words"])
+            merge_shards(containing_shards, result["containing"])
+            completed += len(chunk)
+            print_progress(completed, len(texts), started_at, completed >= len(texts))
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(export_entry_chunk, str(db_path), chunk, include_containing) for chunk in chunks]
+            for future in as_completed(futures):
+                result = future.result()
+                merge_shards(entry_shards, result["entries"])
+                merge_shards(summary_shards, result["summaries"])
+                merge_shards(character_shards, result["characters"])
+                merge_shards(word_shards, result["words"])
+                merge_shards(containing_shards, result["containing"])
+                completed += sum(len(values) for values in result["entries"].values())
+                print_progress(completed, len(texts), started_at, completed >= len(texts))
 
     bytes_written = 0
     for shard, payload in summary_shards.items():
         bytes_written += write_json(out_dir / "data" / "summaries" / f"{shard}.json", payload)
     for shard, payload in entry_shards.items():
         bytes_written += write_json(out_dir / "data" / "entries" / f"{shard}.json", payload)
+    for shard, payload in character_shards.items():
+        bytes_written += write_json(out_dir / "data" / "characters" / f"{shard}.json", payload)
+    for shard, payload in word_shards.items():
+        bytes_written += write_json(out_dir / "data" / "words" / f"{shard}.json", payload)
+    for shard, payload in containing_shards.items():
+        bytes_written += write_json(out_dir / "data" / "containing" / f"{shard}.json", payload)
 
     segmenter = segmenter_groups(conn)
     segmenter_manifest = {}
@@ -136,7 +277,7 @@ def export_data(db_path: Path, out_dir: Path, limit: int | None) -> dict[str, An
 
     source_count = conn.execute("SELECT count(*) FROM sources").fetchone()[0]
     manifest = {
-        "version": 1,
+        "version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "db_path": str(db_path.relative_to(ROOT) if db_path.is_relative_to(ROOT) else db_path),
         "shard_count": SHARD_COUNT,
@@ -146,6 +287,9 @@ def export_data(db_path: Path, out_dir: Path, limit: int | None) -> dict[str, An
         "paths": {
             "entries": "data/entries/{shard}.json",
             "summaries": "data/summaries/{shard}.json",
+            "characters": "data/characters/{shard}.json",
+            "words": "data/words/{shard}.json",
+            "containing": "data/containing/{shard}.json",
             "segmenter": "data/segmenter/{hashShard(firstChar)}.json",
         },
         "segmenter": segmenter_manifest,
@@ -156,12 +300,22 @@ def export_data(db_path: Path, out_dir: Path, limit: int | None) -> dict[str, An
         "entries": len(texts),
         "summary_shards": SHARD_COUNT,
         "entry_shards": SHARD_COUNT,
+        "character_shards": SHARD_COUNT,
+        "word_shards": SHARD_COUNT,
+        "containing_shards": SHARD_COUNT,
         "segmenter_shards": len(segmenter),
+        "workers": workers,
+        "chunk_size": chunk_size,
+        "include_containing": include_containing,
         "json_bytes": bytes_written,
     }
     write_json(out_dir / "data" / "export-report.json", report)
     conn.close()
     return report
+
+
+def default_workers() -> int:
+    return max(1, min((os.cpu_count() or 2) - 1, 8))
 
 
 def parse_args() -> argparse.Namespace:
@@ -170,6 +324,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="Output directory")
     parser.add_argument("--limit", type=int, default=None, help="Development-only limit for exported entries")
     parser.add_argument("--skip-vite", action="store_true", help="Only export data, preserving existing static assets")
+    parser.add_argument("--workers", type=int, default=default_workers(), help="Entry export worker processes")
+    parser.add_argument("--chunk-size", type=int, default=500, help="Texts assigned to each worker task")
+    parser.add_argument("--no-containing", action="store_true", help="Skip containing-word shards for faster/smaller exports")
     return parser.parse_args()
 
 
@@ -181,6 +338,10 @@ def main() -> None:
         raise SystemExit(f"Database not found: {db_path}")
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be positive")
+    if args.workers < 1:
+        raise SystemExit("--workers must be positive")
+    if args.chunk_size < 1:
+        raise SystemExit("--chunk-size must be positive")
 
     if out_dir.exists() and not args.skip_vite:
         shutil.rmtree(out_dir)
@@ -191,7 +352,7 @@ def main() -> None:
     data_dir = out_dir / "data"
     if data_dir.exists():
         shutil.rmtree(data_dir)
-    report = export_data(db_path, out_dir, args.limit)
+    report = export_data(db_path, out_dir, args.limit, args.workers, args.chunk_size, not args.no_containing)
     print(compact_json(report))
 
 
