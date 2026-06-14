@@ -170,11 +170,22 @@ function isChineseToken(value) {
   return value && Array.from(value).every((char) => /\p{Script=Han}/u.test(char));
 }
 
+function preferredChineseVoice() {
+  if (!('speechSynthesis' in window)) return null;
+  const voices = window.speechSynthesis.getVoices();
+  return voices.find((voice) => voice.lang?.toLowerCase().startsWith('zh') && voice.name?.toLowerCase().includes('google'))
+    || voices.find((voice) => voice.lang?.toLowerCase() === 'zh-cn')
+    || voices.find((voice) => voice.lang?.toLowerCase().startsWith('zh'))
+    || null;
+}
+
 function speakChinese(value) {
   if (!('speechSynthesis' in window)) return;
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(value);
   utterance.lang = 'zh-CN';
+  const voice = preferredChineseVoice();
+  if (voice) utterance.voice = voice;
   window.speechSynthesis.speak(utterance);
 }
 
