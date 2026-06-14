@@ -4,6 +4,7 @@ import { Volume2 } from 'lucide-react';
 import './styles.css';
 
 const API = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8000';
+const STATIC_DATA = import.meta.env.VITE_STATIC_DATA === '1';
 const SEARCH_PLACEHOLDER = '天天中彩票';
 const READING_LABELS = { pinyin: 'Pinyin', zhuyin: 'Zhuyin', jyutping: 'Jyutping', korean: 'Korean', japanese: 'Japanese' };
 
@@ -11,6 +12,117 @@ async function api(path, options) {
   const res = await fetch(`${API}${path}`, options);
   if (!res.ok) throw new Error(await res.text());
   return res.json();
+}
+
+const jsonCache = new Map();
+const textEncoder = new TextEncoder();
+
+function dataUrl(path) {
+  return `${import.meta.env.BASE_URL}${path}`;
+}
+
+async function fetchJson(path) {
+  if (!jsonCache.has(path)) {
+    jsonCache.set(path, fetch(dataUrl(path)).then((res) => {
+      if (!res.ok) throw new Error(`Static data not found: ${path}`);
+      return res.json();
+    }));
+  }
+  return jsonCache.get(path);
+}
+
+function fnv1a32(value) {
+  let hash = 0x811c9dc5;
+  for (const byte of textEncoder.encode(value)) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function hashShard(value) {
+  return (fnv1a32(value) % 256).toString(16).padStart(2, '0');
+}
+
+async function staticSummary(text) {
+  const shard = await fetchJson(`data/summaries/${hashShard(text)}.json`);
+  return shard[text] || { text, has_character: 0, has_word: 0 };
+}
+
+async function staticEntry(text) {
+  const shard = await fetchJson(`data/entries/${hashShard(text)}.json`);
+  return shard[text] || {
+    text,
+    summary: await staticSummary(text),
+    character: null,
+    character_detail: null,
+    words: [],
+    word_readings: [],
+    readings: [],
+    characters: Array.from(text).length > 1 ? await Promise.all(Array.from(text).map(staticSummary)) : [],
+    related_words: [],
+    hsk: { word_levels: [], character_levels: [] },
+  };
+}
+
+async function getEntryData(text) {
+  if (STATIC_DATA) return staticEntry(text);
+  return api(`/api/entry/${encodeURIComponent(text)}`);
+}
+
+function isHanChar(value) {
+  return /\p{Script=Han}/u.test(value);
+}
+
+async function segmenterTerms(firstChar) {
+  const shard = await fetchJson(`data/segmenter/${hashShard(firstChar)}.json`).catch(() => ({}));
+  return shard[firstChar] || [];
+}
+
+async function segmentStatic(text) {
+  const tokens = [];
+  let i = 0;
+  while (i < text.length) {
+    const char = String.fromCodePoint(text.codePointAt(i));
+    const charLength = char.length;
+    if (!isHanChar(char)) {
+      const start = i;
+      i += charLength;
+      while (i < text.length) {
+        const next = String.fromCodePoint(text.codePointAt(i));
+        if (isHanChar(next)) break;
+        i += next.length;
+      }
+      tokens.push({ text: text.slice(start, i), start, end: i });
+      continue;
+    }
+
+    const terms = await segmenterTerms(char);
+    const match = terms.find((term) => text.startsWith(term, i));
+    const tokenText = match || char;
+    tokens.push({ text: tokenText, start: i, end: i + tokenText.length });
+    i += tokenText.length;
+  }
+
+  const out = [];
+  for (const token of tokens) {
+    const summary = await staticSummary(token.text);
+    if (Array.from(token.text).length > 1 && /\p{Script=Han}/u.test(token.text) && !summary.has_character && !summary.has_word) {
+      let offset = token.start;
+      for (const char of Array.from(token.text)) {
+        out.push({ text: char, start: offset, end: offset + char.length, entry: await staticSummary(char) });
+        offset += char.length;
+      }
+    } else {
+      out.push({ ...token, entry: summary });
+    }
+  }
+  return { text, tokens: out };
+}
+
+async function segmentText(text) {
+  if (STATIC_DATA) return segmentStatic(text);
+  return api('/api/segment', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})});
 }
 
 function useHashRoute() {
@@ -205,7 +317,7 @@ function EntryPage({ text, navigateEntry = (value) => go(`/entry/${encodeURIComp
   const [err, setErr] = useState('');
   useEffect(() => {
     setData(null); setErr('');
-    api(`/api/entry/${encodeURIComponent(text)}`).then(setData).catch(e => setErr(e.message));
+    getEntryData(text).then(setData).catch(e => setErr(e.message));
   }, [text]);
   useEffect(() => {
     if (data?.text) speakChinese(data.text);
@@ -278,7 +390,7 @@ function ReaderPage({ initialText = '我想學中文', selectedEntry = '' }) {
   }, []);
   useEffect(() => {
     const handle = setTimeout(() => {
-      api('/api/segment', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({text})}).then(setData);
+      segmentText(text).then(setData);
     }, 180);
     return () => clearTimeout(handle);
   }, [text]);
