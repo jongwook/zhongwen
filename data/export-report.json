@@ -1,0 +1,1 @@
+{"chunk_size":500,"entries":281814,"include_containing":true,"json_bytes":671486455,"shard_counts":{"characters":1024,"containing":1024,"entries":1024,"segmenter":4096,"summaries":4096,"words":1024},"workers":12,"written_shards":{"characters":1024,"containing":1024,"entries":1024,"segmenter":4096,"summaries":4096,"words":1024}}
